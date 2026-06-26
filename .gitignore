@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+
+# Local/OpenClaw runtime
+.alice_run_notes.txt
+.learnings/
+
+# Generated data and reports
+cache/
+output/
+*.log
+
+# Personal trading/account files - do not publish
+holdings.csv
+trades.csv
+自动持仓.csv
+交割单.xlsx
+
+# Local backups
+*.bak
+*.bak_*
+*_backup.*
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

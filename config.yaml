@@ -1,0 +1,90 @@
+# 数据获取相关配置
+data:
+  history_days: 300
+  stock_candidate_size: 80
+  fundamental_prefetch_limit: 100
+  fundamental_fetch_timeout_seconds: 240
+  use_subprocess_fundamental_fetch: false
+  fundamental_per_symbol_timeout_seconds: 8
+  disable_slow_fundamental_fetch: false
+  include_etf: false
+  etf_candidate_size: 80
+  adjust: qfq
+  stock_history_source: yahoo
+  request_sleep_seconds: 0.1
+  max_workers: 8
+  cache_history: true
+
+# 股票池：流通市值 + 成交额综合筛选
+universe:
+  target_universe_size: 80
+  min_listing_days: 180
+  min_price: 3
+  min_avg_amount_20d: 80000000
+  min_float_market_cap: 5000000000
+
+# 估值：PE_TTM 只作为评分，不再硬剔除；PEG 暂时禁用
+valuation:
+  use_pe_ttm: true
+  pe_mode: industry_percentile_score
+  use_peg: false
+
+# 财务质量：以排雷为主；字段缺失时程序中性处理，不报错
+quality:
+  hard_filter:
+    roe_min: 0
+    ocf_to_net_profit_min: 0
+    deducted_profit_growth_min: -0.50
+  scoring:
+    roe:
+      weight: 0.40
+      pass_line: 0.06
+      good_line: 0.10
+    ocf_to_net_profit:
+      weight: 0.35
+      pass_line: 0.50
+      good_line: 0.80
+    deducted_profit_growth:
+      weight: 0.25
+      pass_line: -0.10
+      good_line: 0.00
+
+# 基础过滤条件：历史行情后的二次过滤
+filter:
+  min_price_stock: 3
+  min_price_etf: 0.2
+  min_amount_stock: 80000000
+  market_cap_top_n_stock: 0
+  max_pe_ttm_stock: 50
+  max_peg_stock: 1.8
+  strict_fundamental_filters: false
+  min_amount_etf: 10000000
+  min_history_bars: 120
+  max_ret20: 0.45
+  max_mdd60_abs: 0.35
+
+# 策略层参数：每周调仓，不自动下单
+strategy:
+  top_n: 10
+  sell_rank_buffer: 30
+  target_position_weak: 0.30
+  target_position_normal: 0.60
+  target_position_strong: 0.85
+  target_position_hot: 0.95
+  reference_capital: 20000
+
+rebalance:
+  buy_top_n: 10
+  sell_rank_buffer: 30
+
+# 简化后的五类因子权重
+factor_weights:
+  momentum_trend: 0.35
+  quality: 0.20
+  valuation: 0.15
+  liquidity: 0.15
+  risk: 0.15
+
+risk:
+  warning_loss_pct: -0.10
+  stop_loss_pct: -0.15
