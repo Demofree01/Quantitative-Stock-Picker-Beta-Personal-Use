@@ -726,9 +726,7 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
         "https://82.push2.eastmoney.com/api/qt/clist/get",
         "https://75.push2.eastmoney.com/api/qt/clist/get",
     ]
-    params = {
-        "pn": 1,
-        "pz": 6000,
+    base_params = {
         "po": 1,
         "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
@@ -738,24 +736,33 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": fields,
     }
+    page_size = 100
     last_exc: Optional[Exception] = None
     for base_url in hosts:
         try:
-            url = base_url + "?" + urllib.parse.urlencode(params)
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://quote.eastmoney.com/",
-                    "Accept": "application/json,text/plain,*/*",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            rows = (((payload or {}).get("data") or {}).get("diff") or [])
-            if not rows:
+            all_rows = []
+            for page in range(1, 100):
+                params = {**base_params, "pn": page, "pz": page_size}
+                url = base_url + "?" + urllib.parse.urlencode(params)
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://quote.eastmoney.com/",
+                        "Accept": "application/json,text/plain,*/*",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                rows = (((payload or {}).get("data") or {}).get("diff") or [])
+                if not rows:
+                    break
+                all_rows.extend(rows)
+                if len(rows) < page_size:
+                    break
+            if not all_rows:
                 raise RuntimeError("东方财富快照接口返回为空")
-            out = pd.DataFrame(rows).rename(
+            out = pd.DataFrame(all_rows).drop_duplicates(subset=["f12"]).rename(
                 columns={
                     "f12": "代码",
                     "f14": "名称",
