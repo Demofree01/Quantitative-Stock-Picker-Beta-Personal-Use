@@ -99,7 +99,6 @@ def load_config() -> Dict[str, Any]:
     data["valuation"].setdefault("pe_mode", "industry_percentile_score")
     data["valuation"].setdefault("use_peg", False)
     data["quality"].setdefault("hard_filter", {})
-    data["quality"].setdefault("scoring", {})
     data["quality"]["hard_filter"].setdefault("roe_min", 0)
     data["quality"]["hard_filter"].setdefault("ocf_to_net_profit_min", 0)
     data["quality"]["hard_filter"].setdefault("deducted_profit_growth_min", -0.50)
@@ -1018,21 +1017,6 @@ def bounded_score(series: pd.Series, pass_line: float, good_line: float, neutral
     return score.clip(0, 1).fillna(neutral) * 100.0
 
 
-def compute_quality_score(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Series:
-    qcfg = cfg.get("quality", {}).get("scoring", {})
-    roe_cfg = qcfg.get("roe", {})
-    ocf_cfg = qcfg.get("ocf_to_net_profit", {})
-    growth_cfg = qcfg.get("deducted_profit_growth", {})
-    roe = bounded_score(df.get("ROE", pd.Series(np.nan, index=df.index)), float(roe_cfg.get("pass_line", 0.06)), float(roe_cfg.get("good_line", 0.10)))
-    ocf = bounded_score(df.get("经营现金流/净利润", pd.Series(np.nan, index=df.index)), float(ocf_cfg.get("pass_line", 0.50)), float(ocf_cfg.get("good_line", 0.80)))
-    growth = bounded_score(df.get("扣非净利润同比", pd.Series(np.nan, index=df.index)), float(growth_cfg.get("pass_line", -0.10)), float(growth_cfg.get("good_line", 0.00)))
-    return (
-        roe * float(roe_cfg.get("weight", 0.40))
-        + ocf * float(ocf_cfg.get("weight", 0.35))
-        + growth * float(growth_cfg.get("weight", 0.25))
-    )
-
-
 def compute_valuation_score(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Series:
     if not bool(cfg.get("valuation", {}).get("use_pe_ttm", True)):
         return pd.Series(50.0, index=df.index)
@@ -1548,24 +1532,21 @@ def score_candidates(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     out["score_volume"] = out["pct_amount_ratio"]
     out["score_liquidity"] = out["pct_avg_amount_20"] * 0.70 + out["pct_amount_ratio"] * 0.30
     out["score_risk"] = out["pct_vol60"] * 0.50 + out["pct_mdd60"] * 0.50
-    out["quality_score"] = compute_quality_score(out, cfg)
     out["valuation_score"] = compute_valuation_score(out, cfg)
     out["total_score"] = (
-        out["score_momentum_trend"] * float(weights.get("momentum_trend", weights.get("momentum", 0.35)))
-        + out["quality_score"] * float(weights.get("quality", 0.20))
-        + out["valuation_score"] * float(weights.get("valuation", 0.15))
-        + out["score_liquidity"] * float(weights.get("liquidity", 0.15))
-        + out["score_risk"] * float(weights.get("risk", 0.15))
+        out["score_momentum_trend"] * float(weights.get("momentum_trend", weights.get("momentum", 0.4375)))
+        + out["valuation_score"] * float(weights.get("valuation", 0.1875))
+        + out["score_liquidity"] * float(weights.get("liquidity", 0.1875))
+        + out["score_risk"] * float(weights.get("risk", 0.1875))
     )
     out["入选原因"] = out.apply(
-        lambda r: f"趋势动量{r.get('score_momentum_trend', 0):.1f}，质量{r.get('quality_score', 0):.1f}，估值{r.get('valuation_score', 0):.1f}",
+        lambda r: f"趋势动量{r.get('score_momentum_trend', 0):.1f}，估值{r.get('valuation_score', 0):.1f}，流动性{r.get('score_liquidity', 0):.1f}，风险{r.get('score_risk', 0):.1f}",
         axis=1,
     )
     out["风险提示"] = out.apply(
         lambda r: "；".join([x for x in [
             "PE缺失或非正" if pd.isna(r.get("pe_ttm")) or to_number(r.get("pe_ttm")) <= 0 else "",
             "PE偏高" if to_number(r.get("pe_ttm")) > 80 else "",
-            "财务字段缺失按中性分" if pd.isna(r.get("ROE")) or pd.isna(r.get("经营现金流/净利润")) or pd.isna(r.get("扣非净利润同比")) else "",
             "上市日期缺失" if pd.isna(r.get("listing_days")) else "",
         ] if x]) or "无明显模型风险提示",
         axis=1,
@@ -2004,7 +1985,6 @@ def export_columns(df: pd.DataFrame, column_order: List[str]) -> pd.DataFrame:
         "pe_ttm": "PE_TTM",
         "peg": "PEG",
         "score_momentum_trend": "趋势动量分",
-        "quality_score": "财务质量分",
         "valuation_score": "估值得分",
         "入选原因": "入选原因",
         "风险提示": "风险提示",
@@ -2064,7 +2044,7 @@ def format_cell(cell, col_name: str) -> None:
         cell.number_format = '#,##0.00'
     elif col_name in {"成交额放大倍数", "最新价/60日均线", "20日均线/60日均线", "最新价/120日均线"}:
         cell.number_format = "0.00"
-    elif col_name in {"动量得分", "趋势得分", "成交活跃得分", "流动性得分", "风险控制得分", "综合评分", "综合得分", "股票池排名分", "流通市值排名分", "成交额排名分", "财务质量分", "估值得分", "趋势动量分", "成交活跃分", "风险分"}:
+    elif col_name in {"动量得分", "趋势得分", "成交活跃得分", "流动性得分", "风险控制得分", "综合评分", "综合得分", "股票池排名分", "流通市值排名分", "成交额排名分", "估值得分", "趋势动量分", "成交活跃分", "风险分"}:
         cell.number_format = "0.0"
     elif col_name in {"排名", "历史交易日数", "持仓数量", "建议买入股数", "建议卖出股数"}:
         cell.number_format = "0"
@@ -2539,7 +2519,6 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
                 "pnl_pct",
                 "rank",
                 "pe_ttm",
-                "quality_score",
                 "valuation_score",
                 "score_momentum_trend",
                 "score_liquidity",
@@ -2587,7 +2566,6 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
                 "score_liquidity": np.nan,
                 "score_risk": np.nan,
                 "score_momentum_trend": np.nan,
-                "quality_score": np.nan,
                 "valuation_score": np.nan,
                 "pe_ttm": np.nan,
                 "total_score": np.nan,
@@ -2628,7 +2606,6 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
             "score_liquidity": to_number(matched.get("score_liquidity")),
             "score_risk": to_number(matched.get("score_risk")),
             "score_momentum_trend": to_number(matched.get("score_momentum_trend")),
-            "quality_score": to_number(matched.get("quality_score")),
             "valuation_score": to_number(matched.get("valuation_score")),
             "pe_ttm": to_number(matched.get("pe_ttm")),
             "total_score": to_number(matched.get("total_score")),
@@ -2668,7 +2645,6 @@ def build_action_lists(scored: pd.DataFrame, holdings_check: pd.DataFrame) -> Tu
         "latest_close",
         "total_score",
         "universe_score",
-        "quality_score",
         "valuation_score",
         "pe_ttm",
         "score_momentum_trend",
@@ -2872,7 +2848,6 @@ def prepare_output_dfs(
                 "ROE",
                 "经营现金流/净利润",
                 "扣非净利润同比",
-                "quality_score",
                 "pe_ttm",
                 "valuation_score",
                 "score_momentum_trend",
@@ -2905,7 +2880,6 @@ def prepare_output_dfs(
                     "latest_close",
                     "total_score",
                     "universe_score",
-                    "quality_score",
                     "valuation_score",
                     "pe_ttm",
                     "score_momentum_trend",

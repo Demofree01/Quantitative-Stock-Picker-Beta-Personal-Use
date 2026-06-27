@@ -29,25 +29,12 @@ valuation:
   pe_mode: industry_percentile_score
   use_peg: false
 
-# 财务质量：以排雷为主；字段缺失时程序中性处理，不报错
+# 财务质量字段当前无法稳定获取：不参与评分；仅保留有值时的排雷过滤。
 quality:
   hard_filter:
     roe_min: 0
     ocf_to_net_profit_min: 0
     deducted_profit_growth_min: -0.50
-  scoring:
-    roe:
-      weight: 0.40
-      pass_line: 0.06
-      good_line: 0.10
-    ocf_to_net_profit:
-      weight: 0.35
-      pass_line: 0.50
-      good_line: 0.80
-    deducted_profit_growth:
-      weight: 0.25
-      pass_line: -0.10
-      good_line: 0.00
 
 # 基础过滤条件：历史行情后的二次过滤
 filter:
@@ -77,13 +64,12 @@ rebalance:
   buy_top_n: 10
   sell_rank_buffer: 30
 
-# 简化后的五类因子权重
+# 简化后的四类因子权重；已删除无法稳定获取的财务质量分。
 factor_weights:
-  momentum_trend: 0.35
-  quality: 0.20
-  valuation: 0.15
-  liquidity: 0.15
-  risk: 0.15
+  momentum_trend: 0.4375
+  valuation: 0.1875
+  liquidity: 0.1875
+  risk: 0.1875
 
 risk:
   warning_loss_pct: -0.10
