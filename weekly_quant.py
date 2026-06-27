@@ -96,7 +96,7 @@ def load_config() -> Dict[str, Any]:
     data["universe"].setdefault("min_avg_amount_20d", float(data.get("filter", {}).get("min_amount_stock", 80000000)))
     data["universe"].setdefault("min_float_market_cap", 5000000000)
     data["valuation"].setdefault("use_pe_ttm", True)
-    data["valuation"].setdefault("pe_mode", "industry_percentile_score")
+    data["valuation"].setdefault("pe_mode", "global_percentile_score")
     data["valuation"].setdefault("use_peg", False)
     data["quality"].setdefault("hard_filter", {})
     data["quality"]["hard_filter"].setdefault("roe_min", 0)
@@ -1023,16 +1023,10 @@ def compute_valuation_score(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Series:
     pe = pd.to_numeric(df.get("pe_ttm", df.get("PE_TTM", pd.Series(np.nan, index=df.index))), errors="coerce")
     score = pd.Series(30.0, index=df.index, dtype=float)
     valid = pe > 0
-    industry = df.get("industry", df.get("行业", pd.Series("全市场", index=df.index))).fillna("全市场")
     if valid.any():
-        # 同行业 PE 越低，分越高；行业样本太少时自动退化为全市场分位。
-        tmp = pd.DataFrame({"pe": pe, "industry": industry}, index=df.index)
-        global_score = pct_rank(tmp["pe"], higher_is_better=False)
-        score.loc[valid] = global_score.loc[valid]
-        for _, idx in tmp[valid].groupby("industry").groups.items():
-            idx = list(idx)
-            if len(idx) >= 5:
-                score.loc[idx] = pct_rank(tmp.loc[idx, "pe"], higher_is_better=False)
+        # 全样本 PE_TTM 反向分位：候选池内 PE 越低，估值得分越高。
+        # 当前数据源的行业字段不稳定，因此不再按行业分组。
+        score.loc[valid] = pct_rank(pe, higher_is_better=False).loc[valid]
     score.loc[pe > 80] = score.loc[pe > 80].clip(upper=35.0)
     score.loc[pe.isna() | (pe <= 0)] = 30.0
     return score.fillna(30.0)

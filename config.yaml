@@ -26,7 +26,7 @@ universe:
 # 估值：PE_TTM 只作为评分，不再硬剔除；PEG 暂时禁用
 valuation:
   use_pe_ttm: true
-  pe_mode: industry_percentile_score
+  pe_mode: global_percentile_score
   use_peg: false
 
 # 财务质量字段当前无法稳定获取：不参与评分；仅保留有值时的排雷过滤。
