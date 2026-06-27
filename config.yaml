@@ -18,6 +18,8 @@ data:
 # 股票池：流通市值 + 成交额综合筛选
 universe:
   target_universe_size: 80
+  extra_rank_start: 200
+  extra_rank_end: 220
   min_listing_days: 180
   min_price: 3
   min_avg_amount_20d: 80000000

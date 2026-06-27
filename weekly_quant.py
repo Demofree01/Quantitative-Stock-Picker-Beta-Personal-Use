@@ -91,6 +91,8 @@ def load_config() -> Dict[str, Any]:
     data.setdefault("valuation", {})
     data.setdefault("quality", {})
     data["universe"].setdefault("target_universe_size", int(data.get("data", {}).get("stock_candidate_size", 200)))
+    data["universe"].setdefault("extra_rank_start", 200)
+    data["universe"].setdefault("extra_rank_end", 220)
     data["universe"].setdefault("min_listing_days", 180)
     data["universe"].setdefault("min_price", float(data.get("filter", {}).get("min_price_stock", 3)))
     data["universe"].setdefault("min_avg_amount_20d", float(data.get("filter", {}).get("min_amount_stock", 80000000)))
@@ -1049,6 +1051,8 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
     raw_count = len(merged)
     universe_cfg = cfg.get("universe", {})
     target_size = int(universe_cfg.get("target_universe_size", cfg.get("data", {}).get("stock_candidate_size", 200)))
+    extra_rank_start = int(universe_cfg.get("extra_rank_start", 200))
+    extra_rank_end = int(universe_cfg.get("extra_rank_end", 220))
     min_listing_days = int(universe_cfg.get("min_listing_days", 180))
     min_price = float(universe_cfg.get("min_price", cfg.get("filter", {}).get("min_price_stock", 3)))
     min_amount = float(universe_cfg.get("min_avg_amount_20d", cfg.get("filter", {}).get("min_amount_stock", 80000000)))
@@ -1087,15 +1091,22 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
         merged["流通市值排名分"] = 50.0
     merged["成交额排名分"] = pct_rank(merged["成交额"], higher_is_better=True)
     merged["股票池排名分"] = merged["流通市值排名分"] * 0.60 + merged["成交额排名分"] * 0.40
-    merged = merged.sort_values(["股票池排名分", "流通市值", "成交额"], ascending=[False, False, False]).head(target_size).copy()
+    merged = merged.sort_values(["股票池排名分", "流通市值", "成交额"], ascending=[False, False, False]).reset_index(drop=True)
+    merged["股票池初筛排名"] = np.arange(1, len(merged) + 1)
+    top_pool = merged.head(target_size)
+    if extra_rank_start > 0 and extra_rank_end >= extra_rank_start:
+        extra_pool = merged[(merged["股票池初筛排名"] >= extra_rank_start) & (merged["股票池初筛排名"] <= extra_rank_end)]
+        merged = pd.concat([top_pool, extra_pool], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")
+    else:
+        merged = top_pool.copy()
 
     # 只对最终股票池补 PE/市值，PEG 按新策略禁用，不参与选股。
     merged = populate_stock_fundamental_metrics(merged, cfg).reset_index(drop=True)
     snapshot_count = len(merged)
-    print(f"股票池初筛：{raw_count} -> {snapshot_count}；使用流通市值+成交额综合排名，保留前{target_size}只。")
+    print(f"股票池初筛：{raw_count} -> {snapshot_count}；使用流通市值+成交额综合排名，保留前{target_size}只 + 第{extra_rank_start}-{extra_rank_end}名。")
     return merged[[
         "代码", "名称", "asset_type", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "上市天数", "行业",
-        "股票池排名分", "流通市值排名分", "成交额排名分", "PE_TTM", "PEG",
+        "股票池排名分", "股票池初筛排名", "流通市值排名分", "成交额排名分", "PE_TTM", "PEG",
     ]].copy()
 
 
@@ -1970,6 +1981,8 @@ def export_columns(df: pd.DataFrame, column_order: List[str]) -> pd.DataFrame:
         "universe_score": "股票池排名分",
         "float_market_cap_score": "流通市值排名分",
         "amount_rank_score": "成交额排名分",
+        "universe_rank": "股票池初筛排名",
+        "股票池初筛排名": "股票池初筛排名",
         "float_market_cap": "流通市值",
         "listing_days": "上市天数",
         "industry": "行业",
@@ -2223,6 +2236,7 @@ def build_analysis_universe(cfg: Dict[str, Any], holdings: pd.DataFrame) -> Tupl
     candidate_df["universe_score"] = pd.to_numeric(candidate_df.get("股票池排名分", np.nan), errors="coerce")
     candidate_df["float_market_cap_score"] = pd.to_numeric(candidate_df.get("流通市值排名分", np.nan), errors="coerce")
     candidate_df["amount_rank_score"] = pd.to_numeric(candidate_df.get("成交额排名分", np.nan), errors="coerce")
+    candidate_df["universe_rank"] = pd.to_numeric(candidate_df.get("股票池初筛排名", np.nan), errors="coerce")
     for col in ["ROE", "经营现金流/净利润", "扣非净利润同比"]:
         candidate_df[col] = pd.to_numeric(candidate_df.get(col, np.nan), errors="coerce")
 
@@ -2270,6 +2284,7 @@ def build_analysis_universe(cfg: Dict[str, Any], holdings: pd.DataFrame) -> Tupl
                 "universe_score": np.nan,
                 "float_market_cap_score": np.nan,
                 "amount_rank_score": np.nan,
+                "universe_rank": np.nan,
                 "ROE": np.nan,
                 "经营现金流/净利润": np.nan,
                 "扣非净利润同比": np.nan,
@@ -2377,6 +2392,7 @@ def fetch_and_analyze_one(rec: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Opt
         "universe_score": rec.get("universe_score"),
         "float_market_cap_score": rec.get("float_market_cap_score"),
         "amount_rank_score": rec.get("amount_rank_score"),
+        "universe_rank": rec.get("universe_rank"),
         "ROE": rec.get("ROE"),
         "经营现金流/净利润": rec.get("经营现金流/净利润"),
         "扣非净利润同比": rec.get("扣非净利润同比"),
@@ -2835,6 +2851,7 @@ def prepare_output_dfs(
                 "ma20_ma60_ratio",
                 "price_ma120_ratio",
                 "universe_score",
+                "universe_rank",
                 "float_market_cap_score",
                 "amount_rank_score",
                 "float_market_cap",
