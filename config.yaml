@@ -76,3 +76,7 @@ factor_weights:
 risk:
   warning_loss_pct: -0.10
   stop_loss_pct: -0.15
+# 账户/交割单处理：current_snapshot 表示 holdings.csv 是券商导出的当前真实持仓，
+# 交割单只用于交易记录盈亏统计，不再叠加滚动当前持仓，避免历史交易重复计算。
+portfolio:
+  holdings_mode: current_snapshot

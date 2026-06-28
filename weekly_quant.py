@@ -3302,24 +3302,32 @@ def main() -> None:
     trade_records_path = resolve_trade_records_path()
     trades = safe_read_trade_records(trade_records_path)
     add_status_step("读取持仓和交易记录")
-    holdings_loaded = apply_trade_records_to_holdings(base_holdings, trades)
+    portfolio_cfg = cfg.get("portfolio", {}) if isinstance(cfg.get("portfolio", {}), dict) else {}
+    holdings_mode = str(portfolio_cfg.get("holdings_mode", "roll_forward")).strip().lower()
+    if holdings_mode in {"current_snapshot", "snapshot", "current"}:
+        holdings_loaded = base_holdings.copy()
+        holdings_roll_note = "持仓文件按当前账户快照读取，交割单仅用于交易盈亏统计，未叠加滚动持仓。"
+    else:
+        holdings_loaded = apply_trade_records_to_holdings(base_holdings, trades)
+        holdings_roll_note = "已按 holdings.csv + 交割单自动滚动当前持仓和现金。"
     try:
         holdings_loaded.to_csv(AUTO_HOLDINGS_PATH, index=False, encoding="utf-8-sig")
     except Exception:
         pass
-    add_status_step("滚动生成当前持仓")
+    add_status_step("读取/生成当前持仓")
     scored, holdings_loaded, failures = run_analysis(cfg, holdings_loaded)
     add_status_step("获取行情并完成候选打分")
     holdings_check = build_holdings_check(scored, holdings_loaded, cfg, failures)
     add_status_step("生成当前持仓检查")
     account_summary = build_account_summary(holdings_loaded, holdings_check, reference_capital)
-    trade_pnl_summary, trade_pnl_export, _, _ = build_realized_pnl_from_trades(trades, base_holdings)
+    pnl_starting_holdings = pd.DataFrame() if holdings_mode in {"current_snapshot", "snapshot", "current"} else base_holdings
+    trade_pnl_summary, trade_pnl_export, _, _ = build_realized_pnl_from_trades(trades, pnl_starting_holdings)
     add_status_step("统计账户资产和交易盈亏")
     realized_pnl = float(trade_pnl_summary.get("realized_pnl", 0.0))
     unrealized_pnl = float(account_summary.get("unrealized_pnl", 0.0))
     trade_record_note = "未提供交割单，仅按 holdings.csv 统计当前持仓和现金。"
     if trade_records_path is not None and trade_records_path.exists():
-        trade_record_note = f"已读取 {trade_records_path.name}，共 {len(trades)} 条有效交易记录，已自动滚动持仓和现金。"
+        trade_record_note = f"已读取 {trade_records_path.name}，共 {len(trades)} 条有效交易记录。{holdings_roll_note}"
         if float(trade_pnl_summary.get("unmatched_sell_shares", 0.0)) > 0:
             trade_record_note += " 有卖出记录缺少对应买入成本，相关已实现盈亏无法完整匹配。"
     if trade_pnl_export.empty:
