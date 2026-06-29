@@ -6,7 +6,7 @@ data:
   fundamental_fetch_timeout_seconds: 240
   use_subprocess_fundamental_fetch: false
   fundamental_per_symbol_timeout_seconds: 8
-  disable_slow_fundamental_fetch: false
+  disable_slow_fundamental_fetch: true
   include_etf: false
   etf_candidate_size: 80
   adjust: qfq

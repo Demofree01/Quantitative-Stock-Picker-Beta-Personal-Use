@@ -741,7 +741,9 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
     for base_url in hosts:
         try:
             all_rows = []
-            for page in range(1, 100):
+            # Eastmoney currently throttles/occasionally hangs on full pagination from this host.
+            # Use the highest-turnover first page as a fast live universe for interactive reports.
+            for page in range(1, 2):
                 params = {**base_params, "pn": page, "pz": page_size}
                 url = base_url + "?" + urllib.parse.urlencode(params)
                 req = urllib.request.Request(
@@ -752,7 +754,7 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
                         "Accept": "application/json,text/plain,*/*",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=8) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                 rows = (((payload or {}).get("data") or {}).get("diff") or [])
                 if not rows:
@@ -786,17 +788,9 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
 
 
 def download_stock_spot() -> pd.DataFrame:
-    last_exc: Optional[Exception] = None
-    for func in [download_stock_spot_eastmoney, getattr(ak, "stock_zh_a_spot_em", None), ak.stock_zh_a_spot]:
-        if func is None:
-            continue
-        try:
-            return normalize_spot_frame(call_with_retry(func, retries=1), "STOCK")
-        except Exception as exc:
-            last_exc = exc
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("股票现货接口失败。")
+    # For trading-day reports, prefer fast live Eastmoney push2 data.
+    # Do not fall back to slow AkShare pagination here: it can hang for minutes and hide freshness failures.
+    return download_stock_spot_eastmoney()
 
 
 def download_stock_code_list() -> pd.DataFrame:
@@ -833,7 +827,7 @@ def download_etf_spot_eastmoney() -> pd.DataFrame:
                 "Accept": "application/json,text/plain,*/*",
             },
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         rows = (((payload or {}).get("data") or {}).get("diff") or [])
         if not rows:
