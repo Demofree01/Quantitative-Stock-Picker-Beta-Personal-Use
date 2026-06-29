@@ -1116,19 +1116,80 @@ def bounded_score(series: pd.Series, pass_line: float, good_line: float, neutral
     return score.clip(0, 1).fillna(neutral) * 100.0
 
 
+INDUSTRY_PE_BENCHMARKS: List[Tuple[Tuple[str, ...], float]] = [
+    (("银行",), 10.0),
+    (("煤炭", "石油", "石化", "油气"), 19.0),
+    (("公用事业", "电力", "燃气", "水务", "交通运输", "交运", "港口", "机场", "航运", "铁路", "高速"), 25.0),
+    (("建筑", "建材", "钢铁", "轻工"), 31.0),
+    (("家电", "食品", "饮料", "白酒", "啤酒"), 38.0),
+    (("医药", "医疗", "生物", "CXO", "创新药", "器械", "制药"), 56.0),
+    (("化工", "材料", "有色", "基础化学", "化学", "新材料"), 38.0),
+    (("汽车", "零部件", "智能驾驶", "乘用车", "商用车"), 44.0),
+    (("电力设备", "光伏", "储能", "锂电", "电池", "风电"), 50.0),
+    (("工程机械", "通用设备", "机器人", "机械设备", "自动化设备", "专用设备"), 50.0),
+    (("半导体", "消费电子", "PCB", "元件", "电子", "光学光电子"), 75.0),
+    (("通信设备", "光模块", "服务器", "通信", "算力"), 63.0),
+    (("软件", "信创", "AI应用", "人工智能", "计算机", "互联网服务", "IT服务"), 88.0),
+    (("军工", "国防", "航空", "航天", "船舶"), 100.0),
+    (("游戏", "影视", "广告", "传媒", "文化传媒"), 50.0),
+]
+
+
+def industry_pe_benchmark(industry: Any) -> float:
+    text = str(industry or "").strip()
+    if not text or text == "未知":
+        return np.nan
+    text_upper = text.upper()
+    for keywords, benchmark in INDUSTRY_PE_BENCHMARKS:
+        if any(str(keyword).upper() in text_upper for keyword in keywords):
+            return benchmark
+    return np.nan
+
+
+def pe_relative_score(pe: float, benchmark: float) -> float:
+    """Score PE relative to an industry benchmark.
+
+    PE<=0 means losses, not cheap valuation, so it gets a low fallback score.
+    Missing/unknown industry is handled by the caller.
+    """
+    if pd.isna(pe):
+        return 30.0
+    if pe <= 0:
+        return 20.0
+    if pd.isna(benchmark) or benchmark <= 0:
+        return np.nan
+    ratio = float(pe) / float(benchmark)
+    if ratio <= 0.7:
+        return 100.0
+    if ratio <= 1.0:
+        return 100.0 - (ratio - 0.7) / 0.3 * 20.0  # benchmark PE => 80
+    if ratio <= 1.5:
+        return 80.0 - (ratio - 1.0) / 0.5 * 45.0   # 1.5x benchmark => 35
+    if ratio <= 2.0:
+        return 35.0 - (ratio - 1.5) / 0.5 * 35.0   # 2.0x benchmark => 0
+    return 0.0
+
+
 def compute_valuation_score(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Series:
     if not bool(cfg.get("valuation", {}).get("use_pe_ttm", True)):
         return pd.Series(50.0, index=df.index)
     pe = pd.to_numeric(df.get("pe_ttm", df.get("PE_TTM", pd.Series(np.nan, index=df.index))), errors="coerce")
-    score = pd.Series(30.0, index=df.index, dtype=float)
-    valid = pe > 0
-    if valid.any():
-        # 全样本 PE_TTM 反向分位：候选池内 PE 越低，估值得分越高。
-        # 当前数据源的行业字段不稳定，因此不再按行业分组。
-        score.loc[valid] = pct_rank(pe, higher_is_better=False).loc[valid]
-    score.loc[pe > 80] = score.loc[pe > 80].clip(upper=35.0)
-    score.loc[pe.isna() | (pe <= 0)] = 30.0
-    return score.fillna(30.0)
+    industry = df.get("industry", df.get("行业", pd.Series("未知", index=df.index)))
+    benchmarks = industry.map(industry_pe_benchmark) if isinstance(industry, pd.Series) else pd.Series(np.nan, index=df.index)
+    score = pd.Series(index=df.index, dtype=float)
+    for idx in df.index:
+        score.loc[idx] = pe_relative_score(pe.loc[idx], benchmarks.loc[idx])
+    missing_benchmark = score.isna()
+    if missing_benchmark.any():
+        # 兜底：行业无法映射时仍按全样本 PE 反向分位打分，避免行业字段偶发变化导致估值分全丢。
+        valid = pe > 0
+        fallback = pd.Series(30.0, index=df.index, dtype=float)
+        if valid.any():
+            fallback.loc[valid] = pct_rank(pe, higher_is_better=False).loc[valid]
+        fallback.loc[pe.isna()] = 30.0
+        fallback.loc[pe <= 0] = 20.0
+        score.loc[missing_benchmark] = fallback.loc[missing_benchmark]
+    return score.clip(0, 100).fillna(30.0)
 
 
 
