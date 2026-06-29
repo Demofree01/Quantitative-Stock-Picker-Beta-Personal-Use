@@ -705,22 +705,24 @@ def normalize_spot_frame(df: pd.DataFrame, asset_type: str) -> pd.DataFrame:
         out["PE_TTM"] = next((out[col] for col in pe_aliases if col in out.columns), np.nan)
     if "PEG" not in out.columns:
         out["PEG"] = np.nan
+    if "市值排名" not in out.columns:
+        out["市值排名"] = np.nan
     if out["总市值"].isna().all() and "流通市值" in out.columns:
         out["总市值"] = out["流通市值"]
     out["代码"] = out["代码"].map(normalize_code)
     out["名称"] = out["名称"].map(clean_name)
-    for col in ["最新价", "成交额", "成交量", "总市值", "流通市值", "PE_TTM", "PEG"]:
+    for col in ["最新价", "成交额", "成交量", "总市值", "流通市值", "PE_TTM", "PEG", "市值排名"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out["上市日期"] = pd.to_datetime(out["上市日期"], errors="coerce")
     out["行业"] = out["行业"].fillna("未知").astype(str).str.strip().replace("", "未知")
     out["asset_type"] = asset_type
     out = out[out["代码"] != ""].copy()
-    return out[["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG", "asset_type"]].copy()
+    return out[["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG", "市值排名", "asset_type"]].copy()
 
 
 def download_stock_spot_eastmoney() -> pd.DataFrame:
     """Fetch A-share spot data directly from Eastmoney push2."""
-    fields = "f12,f14,f2,f5,f6,f20,f21,f9,f26,f100"
+    fields = "f12,f14,f2,f5,f6,f20,f21,f9,f115,f26,f100"
     hosts = [
         "https://push2.eastmoney.com/api/qt/clist/get",
         "https://82.push2.eastmoney.com/api/qt/clist/get",
@@ -732,7 +734,7 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
         "invt": 2,
-        "fid": "f6",
+        "fid": "f20",
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": fields,
     }
@@ -741,9 +743,10 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
     for base_url in hosts:
         try:
             all_rows = []
-            # Eastmoney currently throttles/occasionally hangs on full pagination from this host.
-            # Use the highest-turnover first page as a fast live universe for interactive reports.
-            for page in range(1, 2):
+            # User rule: initial universe = total-market-cap ranks 1-80 + 200-220.
+            # Fetch only page 1-3 sorted by total market cap: page 1 covers rank 1-100,
+            # page 2 contains rank 200, page 3 covers rank 201-300.
+            for page in [1, 2, 3]:
                 params = {**base_params, "pn": page, "pz": page_size}
                 url = base_url + "?" + urllib.parse.urlencode(params)
                 req = urllib.request.Request(
@@ -759,9 +762,9 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
                 rows = (((payload or {}).get("data") or {}).get("diff") or [])
                 if not rows:
                     break
+                for i, row in enumerate(rows, start=1):
+                    row["market_cap_rank"] = (page - 1) * page_size + i
                 all_rows.extend(rows)
-                if len(rows) < page_size:
-                    break
             if not all_rows:
                 raise RuntimeError("东方财富快照接口返回为空")
             out = pd.DataFrame(all_rows).drop_duplicates(subset=["f12"]).rename(
@@ -775,7 +778,9 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
                     "f21": "流通市值",
                     "f26": "上市日期",
                     "f100": "行业",
-                    "f9": "PE_TTM",
+                    "f9": "PE_DYNAMIC",
+                    "f115": "PE_TTM",
+                    "market_cap_rank": "市值排名",
                 }
             )
             out["PEG"] = np.nan
@@ -1195,70 +1200,53 @@ def listing_days_from_series(series: pd.Series) -> pd.Series:
 
 def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
     stock_spot = download_stock_spot()
-    keep_cols = ["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG"]
+    keep_cols = ["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG", "市值排名"]
     for col in keep_cols:
         if col not in stock_spot.columns:
             stock_spot[col] = np.nan
     merged = stock_spot[keep_cols].copy()
     raw_count = len(merged)
     universe_cfg = cfg.get("universe", {})
-    target_size = int(universe_cfg.get("target_universe_size", cfg.get("data", {}).get("stock_candidate_size", 200)))
+    target_size = int(universe_cfg.get("target_universe_size", 80))
     extra_rank_start = int(universe_cfg.get("extra_rank_start", 200))
     extra_rank_end = int(universe_cfg.get("extra_rank_end", 220))
     min_listing_days = int(universe_cfg.get("min_listing_days", 180))
-    min_price = float(universe_cfg.get("min_price", cfg.get("filter", {}).get("min_price_stock", 3)))
-    min_amount = float(universe_cfg.get("min_avg_amount_20d", cfg.get("filter", {}).get("min_amount_stock", 80000000)))
-    min_float_cap = float(universe_cfg.get("min_float_market_cap", 5000000000))
 
     merged["名称"] = merged["名称"].map(clean_name)
     merged["asset_type"] = "STOCK"
     merged = merged[merged["代码"].str.startswith(STOCK_PREFIXES)].copy()
     merged = merged[~merged["名称"].map(is_st_like)].copy()
-    merged["最新价"] = pd.to_numeric(merged["最新价"], errors="coerce")
-    merged["成交额"] = pd.to_numeric(merged["成交额"], errors="coerce")
-    merged["总市值"] = pd.to_numeric(merged["总市值"], errors="coerce")
-    merged["流通市值"] = pd.to_numeric(merged["流通市值"], errors="coerce")
+    for col in ["最新价", "成交额", "成交量", "总市值", "流通市值", "PE_TTM", "市值排名"]:
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+    if merged["市值排名"].isna().all():
+        merged = merged.sort_values("总市值", ascending=False).reset_index(drop=True)
+        merged["市值排名"] = np.arange(1, len(merged) + 1)
     merged["上市天数"] = listing_days_from_series(merged["上市日期"])
-    merged["流通市值"] = merged["流通市值"].fillna(merged["总市值"])
-    has_float_cap = merged["流通市值"].notna().any()
 
-    merged = merged[merged["最新价"] >= min_price].copy()
-    merged = merged[merged["成交额"] >= min_amount].copy()
-    if has_float_cap:
-        merged = merged[merged["流通市值"] >= min_float_cap].copy()
-    else:
-        print("股票快照缺少流通市值/总市值字段，已跳过50亿元流通市值硬过滤，先按成交额排名容错运行。")
-    # 上市日期缺失时放行，避免数据源字段缺失导致整批股票被误删；有日期则严格执行 180 天。
+    # Strict user rule: initial universe is total market-cap rank 1-80 plus rank 200-220.
+    top_pool = merged[(merged["市值排名"] >= 1) & (merged["市值排名"] <= target_size)].copy()
+    extra_pool = merged[(merged["市值排名"] >= extra_rank_start) & (merged["市值排名"] <= extra_rank_end)].copy()
+    merged = pd.concat([top_pool, extra_pool], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")
     merged = merged[merged["上市天数"].isna() | (merged["上市天数"] >= min_listing_days)].copy()
 
     if merged.empty:
         print(f"股票快照初筛：{raw_count} -> 0；股票池为空。")
-        for col in ["股票池排名分", "流通市值排名分", "成交额排名分"]:
+        for col in ["股票池排名分", "流通市值排名分", "成交额排名分", "股票池初筛排名"]:
             merged[col] = np.nan
         return merged
 
-    if has_float_cap:
-        merged["流通市值排名分"] = pct_rank(merged["流通市值"], higher_is_better=True)
-    else:
-        merged["流通市值排名分"] = 50.0
+    merged["股票池初筛排名"] = merged["市值排名"]
+    merged["流通市值排名分"] = pct_rank(merged["流通市值"].fillna(merged["总市值"]), higher_is_better=True)
     merged["成交额排名分"] = pct_rank(merged["成交额"], higher_is_better=True)
-    merged["股票池排名分"] = merged["流通市值排名分"] * 0.60 + merged["成交额排名分"] * 0.40
-    merged = merged.sort_values(["股票池排名分", "流通市值", "成交额"], ascending=[False, False, False]).reset_index(drop=True)
-    merged["股票池初筛排名"] = np.arange(1, len(merged) + 1)
-    top_pool = merged.head(target_size)
-    if extra_rank_start > 0 and extra_rank_end >= extra_rank_start:
-        extra_pool = merged[(merged["股票池初筛排名"] >= extra_rank_start) & (merged["股票池初筛排名"] <= extra_rank_end)]
-        merged = pd.concat([top_pool, extra_pool], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")
-    else:
-        merged = top_pool.copy()
+    merged["股票池排名分"] = pct_rank(-merged["市值排名"], higher_is_better=True)
 
-    # 只对最终股票池补 PE/市值，PEG 按新策略禁用，不参与选股。
+    # 只对最终股票池补缺失 PE/市值，PEG 按新策略禁用，不参与选股。
     merged = populate_stock_fundamental_metrics(merged, cfg).reset_index(drop=True)
     snapshot_count = len(merged)
-    print(f"股票池初筛：{raw_count} -> {snapshot_count}；使用流通市值+成交额综合排名，保留前{target_size}只 + 第{extra_rank_start}-{extra_rank_end}名。")
+    print(f"股票池初筛：{raw_count} -> {snapshot_count}；按总市值排名保留1-{target_size}名 + 第{extra_rank_start}-{extra_rank_end}名，再进入筛选和打分。")
     return merged[[
         "代码", "名称", "asset_type", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "上市天数", "行业",
-        "股票池排名分", "股票池初筛排名", "流通市值排名分", "成交额排名分", "PE_TTM", "PEG",
+        "股票池排名分", "股票池初筛排名", "市值排名", "流通市值排名分", "成交额排名分", "PE_TTM", "PEG",
     ]].copy()
 
 
