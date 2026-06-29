@@ -807,8 +807,98 @@ def download_stock_code_list() -> pd.DataFrame:
     return df[["代码", "名称"]].drop_duplicates(subset=["代码"]).reset_index(drop=True)
 
 
+def download_etf_spot_eastmoney() -> pd.DataFrame:
+    """Fetch ETF/LOF spot data directly from Eastmoney push2."""
+    fields = "f12,f14,f2,f5,f6,f20,f21,f9,f26,f100"
+    params_base = {
+        "po": 1,
+        "np": 1,
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": 2,
+        "invt": 2,
+        "fid": "f6",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
+        "fields": fields,
+    }
+    all_rows = []
+    page_size = 100
+    for page in range(1, 80):
+        params = {**params_base, "pn": page, "pz": page_size}
+        url = "https://push2.eastmoney.com/api/qt/clist/get?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+                "Accept": "application/json,text/plain,*/*",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        rows = (((payload or {}).get("data") or {}).get("diff") or [])
+        if not rows:
+            break
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+    if not all_rows:
+        raise RuntimeError("东方财富ETF快照接口返回为空")
+    out = pd.DataFrame(all_rows).drop_duplicates(subset=["f12"]).rename(
+        columns={
+            "f12": "代码",
+            "f14": "名称",
+            "f2": "最新价",
+            "f5": "成交量",
+            "f6": "成交额",
+            "f20": "总市值",
+            "f21": "流通市值",
+            "f26": "上市日期",
+            "f100": "行业",
+            "f9": "PE_TTM",
+        }
+    )
+    out["PEG"] = np.nan
+    return normalize_spot_frame(out, "ETF")
+
+
 def download_etf_spot() -> pd.DataFrame:
-    return normalize_spot_frame(call_with_retry(ak.fund_etf_spot_em, retries=1), "ETF")
+    try:
+        return download_etf_spot_eastmoney()
+    except Exception:
+        return normalize_spot_frame(call_with_retry(ak.fund_etf_spot_em, retries=1), "ETF")
+
+
+def fetch_eastmoney_realtime_quote(code: str, asset_type: str = "STOCK") -> Dict[str, Any]:
+    """Fetch one live quote from Eastmoney push2 as a final spot-price fallback."""
+    code = normalize_code(code)
+    if not code:
+        return {}
+    market = "1" if code.startswith("6") else "0"
+    url = "https://push2.eastmoney.com/api/qt/stock/get?" + urllib.parse.urlencode(
+        {"secid": f"{market}.{code}", "fields": "f43,f57,f58,f47,f48,f116,f117,f9"}
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://quote.eastmoney.com/"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = (json.loads(resp.read().decode("utf-8")) or {}).get("data") or {}
+    price = to_number(data.get("f43"))
+    if pd.notna(price) and float(price) > 1000:
+        price = float(price) / 1000.0
+    return {
+        "代码": code,
+        "名称": clean_name(data.get("f58", "")),
+        "最新价": price,
+        "成交量": to_number(data.get("f47")),
+        "成交额": to_number(data.get("f48")),
+        "总市值": to_number(data.get("f116")),
+        "流通市值": to_number(data.get("f117")),
+        "PE_TTM": to_number(data.get("f9")),
+        "PEG": np.nan,
+        "行业": "未知",
+        "asset_type": asset_type,
+    }
 
 
 def symbol_for_em(code: str) -> str:
@@ -2270,27 +2360,43 @@ def build_analysis_universe(cfg: Dict[str, Any], holdings: pd.DataFrame) -> Tupl
 
     existing_keys = set(candidate_df["key"].astype(str).tolist())
     extra_holding_rows = []
+    missing_holding_types = {str(row["asset_type"]).upper() for _, row in holdings.iterrows() if str(row["key"]) not in existing_keys}
+    holding_spot_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if "STOCK" in missing_holding_types:
+        try:
+            for _, spot_row in download_stock_spot().iterrows():
+                holding_spot_lookup[(normalize_code(spot_row.get("代码")), "STOCK")] = spot_row.to_dict()
+        except Exception as exc:
+            failures.append({"代码": "*", "名称": "持仓股票现货", "asset_type": "STOCK", "failure_stage": "现货快照", "failure_reason": str(exc)})
+    if "ETF" in missing_holding_types:
+        try:
+            for _, spot_row in download_etf_spot().iterrows():
+                holding_spot_lookup[(normalize_code(spot_row.get("代码")), "ETF")] = spot_row.to_dict()
+        except Exception as exc:
+            failures.append({"代码": "*", "名称": "持仓ETF现货", "asset_type": "ETF", "failure_stage": "现货快照", "failure_reason": str(exc)})
     for _, row in holdings.iterrows():
         key = str(row["key"])
         if key in existing_keys:
             continue
+        asset_type = str(row["asset_type"]).upper()
+        spot = holding_spot_lookup.get((normalize_code(row["code"]), asset_type), {})
         extra_holding_rows.append(
             {
                 "代码": row["code"],
-                "名称": row["name"],
+                "名称": spot.get("名称", row["name"]),
                 "asset_type": row["asset_type"],
-                "最新价": np.nan,
-                "成交额": np.nan,
-                "成交量": np.nan,
-                "spot_latest_price": np.nan,
-                "spot_amount": np.nan,
-                "spot_volume": np.nan,
-                "spot_market_cap": np.nan,
-                "pe_ttm": np.nan,
-                "peg": np.nan,
-                "float_market_cap": np.nan,
+                "最新价": spot.get("最新价", np.nan),
+                "成交额": spot.get("成交额", np.nan),
+                "成交量": spot.get("成交量", np.nan),
+                "spot_latest_price": spot.get("最新价", np.nan),
+                "spot_amount": spot.get("成交额", np.nan),
+                "spot_volume": spot.get("成交量", np.nan),
+                "spot_market_cap": spot.get("总市值", np.nan),
+                "pe_ttm": spot.get("PE_TTM", np.nan),
+                "peg": spot.get("PEG", np.nan),
+                "float_market_cap": spot.get("流通市值", np.nan),
                 "listing_days": np.nan,
-                "industry": "未知",
+                "industry": spot.get("行业", "未知"),
                 "universe_score": np.nan,
                 "float_market_cap_score": np.nan,
                 "amount_rank_score": np.nan,
@@ -2557,6 +2663,25 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
         for _, row in failures.iterrows():
             key = (normalize_code(row.get("代码")), infer_asset_type(normalize_code(row.get("代码")), row.get("asset_type")))
             failure_lookup[key] = row.get("failure_reason", "")
+    missing_keys = []
+    for _, hold in holdings.iterrows():
+        code = str(hold["code"])
+        asset_type = str(hold["asset_type"]).upper()
+        if (code, asset_type) not in lookup:
+            missing_keys.append((code, asset_type))
+    holding_spot_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if any(asset_type == "STOCK" for _, asset_type in missing_keys):
+        try:
+            for _, spot_row in download_stock_spot().iterrows():
+                holding_spot_lookup[(normalize_code(spot_row.get("代码")), "STOCK")] = spot_row.to_dict()
+        except Exception:
+            pass
+    if any(asset_type == "ETF" for _, asset_type in missing_keys):
+        try:
+            for _, spot_row in download_etf_spot().iterrows():
+                holding_spot_lookup[(normalize_code(spot_row.get("代码")), "ETF")] = spot_row.to_dict()
+        except Exception:
+            pass
     rows = []
     for _, hold in holdings.iterrows():
         code = str(hold["code"])
@@ -2564,11 +2689,17 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
         key = (code, asset_type)
         matched = lookup.get(key)
         if matched is None:
+            spot = holding_spot_lookup.get(key, {})
+            if not spot or pd.isna(to_number(spot.get("最新价"))):
+                try:
+                    spot = fetch_eastmoney_realtime_quote(code, asset_type)
+                except Exception:
+                    spot = spot or {}
             matched = {
                 "code": code,
-                "name": hold.get("name", ""),
+                "name": spot.get("名称", hold.get("name", "")),
                 "asset_type": asset_type,
-                "latest_close": np.nan,
+                "latest_close": spot.get("最新价", np.nan),
                 "ma20": np.nan,
                 "ma60": np.nan,
                 "ma120": np.nan,
@@ -2594,6 +2725,19 @@ def build_holdings_check(scored: pd.DataFrame, holdings: pd.DataFrame, cfg: Dict
                 "base_failed": True,
             }
         latest_close = to_number(matched.get("latest_close"))
+        if pd.isna(latest_close):
+            spot = holding_spot_lookup.get(key, {})
+            if not spot or pd.isna(to_number(spot.get("最新价"))):
+                try:
+                    spot = fetch_eastmoney_realtime_quote(code, asset_type)
+                except Exception:
+                    spot = spot or {}
+            spot_price = to_number(spot.get("最新价"))
+            if pd.notna(spot_price):
+                latest_close = spot_price
+                matched["latest_close"] = spot_price
+                if spot.get("名称"):
+                    matched["name"] = spot.get("名称")
         cost_price = to_number(hold.get("cost_price"))
         shares = to_number(hold.get("shares"))
         pnl_pct = (latest_close / cost_price - 1.0) if pd.notna(latest_close) and pd.notna(cost_price) and cost_price > 0 else np.nan
