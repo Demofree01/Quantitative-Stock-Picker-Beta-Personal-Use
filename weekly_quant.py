@@ -1427,6 +1427,7 @@ def apply_spot_price_to_history(hist: pd.DataFrame, rec: Dict[str, Any], cfg: Di
     today = current_date_obj().date()
     is_weekday = current_date_obj().weekday() < 5
     strict_fresh = bool(cfg.get("data", {}).get("require_fresh_price_on_weekday", True))
+    require_live_spot = bool(cfg.get("data", {}).get("require_live_spot_price_on_weekday", True))
     out["date"] = pd.to_datetime(out["date"], errors="coerce")
     out = out.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
     last_date = out["date"].iloc[-1].date()
@@ -1434,6 +1435,8 @@ def apply_spot_price_to_history(hist: pd.DataFrame, rec: Dict[str, Any], cfg: Di
     spot_amount = to_number(rec.get("spot_amount"))
     spot_volume = to_number(rec.get("spot_volume"))
     has_spot = pd.notna(spot_price) and float(spot_price) > 0
+    if is_weekday and strict_fresh and require_live_spot and not has_spot:
+        raise RuntimeError(f"工作日运行必须取得现货最新价：{rec.get('code') or rec.get('代码')} {rec.get('name') or rec.get('名称')}，禁止用历史K线/缓存价代替")
     if has_spot:
         new_bar = {
             "date": pd.to_datetime(today),
