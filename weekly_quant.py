@@ -3310,6 +3310,13 @@ def prepare_output_dfs(
         )
     if not failures.empty:
         failures_export = export_columns(failures, ["code", "name", "asset_type", "stage", "failure_reason"])
+        # Parallel history fetching can complete in different orders when cache is enabled.
+        # Sort diagnostics so repeated runs with identical data produce stable workbooks.
+        failures_export = failures_export.sort_values(
+            by=["代码", "名称", "标的类型", "失败阶段", "失败原因"],
+            na_position="last",
+            kind="mergesort",
+        ).reset_index(drop=True)
     else:
         failures_export = pd.DataFrame(columns=["代码", "名称", "标的类型", "失败阶段", "失败原因"])
     return scored_export, holdings_export, buy_rows, reduce_rows, sell_rows, failures_export

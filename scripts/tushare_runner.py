@@ -42,7 +42,10 @@ def read_csv_if_valid(path: Path, required_cols: list[str]) -> Optional[pd.DataF
     if not path.exists():
         return None
     try:
-        df = pd.read_csv(path, dtype={"代码": str})
+        dtype = {"代码": str}
+        if "stock_spot_" in path.name:
+            dtype["上市日期"] = str
+        df = pd.read_csv(path, dtype=dtype)
     except Exception:
         return None
     missing = [col for col in required_cols if col not in df.columns]
