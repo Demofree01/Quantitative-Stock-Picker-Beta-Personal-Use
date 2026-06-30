@@ -10,14 +10,14 @@ data:
   include_etf: false
   etf_candidate_size: 80
   adjust: qfq
-  stock_history_source: yahoo
+  stock_history_source: yahoo  # Tushare独立入口运行时会覆盖为 tushare
   request_sleep_seconds: 0.1
   max_workers: 8
   cache_history: true
   require_fresh_price_on_weekday: true
-  require_live_spot_price_on_weekday: true
+  require_live_spot_price_on_weekday: true  # Tushare独立入口不取盘中价，运行时会覆盖为 false
 
-# 股票池：流通市值 + 成交额综合筛选
+# 股票池：按 Tushare 总市值排名取 1-80、200-220、500-520 三段
 universe:
   target_universe_size: 80
   extra_rank_start: 200
@@ -30,7 +30,7 @@ universe:
   min_avg_amount_20d: 80000000
   min_float_market_cap: 5000000000
 
-# 估值：PE_TTM 只作为评分，不再硬剔除；PEG 暂时禁用
+# 估值：PE_TTM 参与总分；优先行业基准相对评分，行业无法映射时回退全样本分位；PEG 暂时禁用
 valuation:
   use_pe_ttm: true
   pe_mode: global_percentile_score

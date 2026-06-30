@@ -743,9 +743,9 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
     for base_url in hosts:
         try:
             all_rows = []
-            # User rule: initial universe = total-market-cap ranks 1-80 + 200-220.
-            # Fetch only page 1-3 sorted by total market cap: page 1 covers rank 1-100,
-            # page 2 contains rank 200, page 3 covers rank 201-300.
+            # Legacy Eastmoney snapshot path. The authoritative Tushare runner fetches
+            # the full market and applies configured total-market-cap rank ranges
+            # (currently 1-80, 200-220, 500-520) in build_stock_candidates().
             for page in [1, 2, 3]:
                 params = {**base_params, "pn": page, "pz": page_size}
                 url = base_url + "?" + urllib.parse.urlencode(params)
@@ -1304,7 +1304,7 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
         merged["市值排名"] = np.arange(1, len(merged) + 1)
     merged["上市天数"] = listing_days_from_series(merged["上市日期"])
 
-    # Strict user rule: initial universe is total market-cap rank 1-target_size plus configured mid/small-cap rank ranges.
+    # User rule: initial universe is total-market-cap rank 1-target_size plus configured mid/small-cap rank ranges.
     top_pool = merged[(merged["市值排名"] >= 1) & (merged["市值排名"] <= target_size)].copy()
     extra_pools = [merged[(merged["市值排名"] >= start) & (merged["市值排名"] <= end)].copy() for start, end in normalized_extra_ranges]
     merged = pd.concat([top_pool, *extra_pools], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")

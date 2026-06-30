@@ -27,13 +27,13 @@
 python3 -m pip install -r requirements.txt
 ```
 
-如果在 OpenClaw 或 OneDrive/rclone 挂载目录下运行，建议使用：
+如果在 OpenClaw 或 OneDrive/rclone 挂载目录下运行，建议使用 Tushare 独立入口：
 
 ```bash
-bash run_openclaw.sh
+bash run_tushare_once.sh
 ```
 
-`run_openclaw.sh` 会使用 `~/.openclaw/workspace/.venvs/stock_quant` 作为 Python 3.11 虚拟环境，并设置 `OPENCLAW_HEADLESS=1`。
+`run_tushare_once.sh` 会使用 `~/.openclaw/workspace/.venvs/stock_quant` 作为 Python 3.11 虚拟环境，并通过 `scripts/tushare_runner.py` 使用 Tushare 盘后数据。
 
 ## 4. 使用方式
 
@@ -61,17 +61,19 @@ CASH,现金,CASH,5000,1
 
 ### 4.3 运行程序
 
-普通环境：
+推荐前台运行一次：
 
 ```bash
-python3 weekly_quant.py
+bash run_tushare_once.sh
 ```
 
-OpenClaw/headless 环境：
+后台启动一次：
 
 ```bash
-bash run_openclaw.sh
+bash start_tushare_background.sh
 ```
+
+说明：`weekly_quant.py` 保留核心算法；Tushare 数据获取、ETF 长线持仓处理、缓存与验收逻辑由 `scripts/tushare_runner.py` 适配。
 
 ### 4.4 查看结果
 
@@ -106,7 +108,7 @@ output/weekly_report_YYYYMMDD.xlsx
 - 近 60 日最大回撤不超过 35%。
 - 若价格跌破 60 日均线且 20 日均线低于 60 日均线，则剔除。
 - 如能获取流通市值，则优先执行 50 亿元流通市值过滤；如数据源缺失该字段，则程序容错跳过。
-- 股票池按“流通市值排名分 × 60% + 成交额排名分 × 40%”排序，取前 80 只，并额外纳入第 200-220 名，给中小市值标的保留观察入口。
+- 初始股票池按 Tushare 总市值排名选取：第 1-80 名 + 第 200-220 名 + 第 500-520 名；后续再做上市天数、成交额、涨幅、回撤、趋势等过滤。
 
 ### 5.2 综合评分公式
 
@@ -114,9 +116,9 @@ output/weekly_report_YYYYMMDD.xlsx
 
 ```text
 综合得分 = 趋势动量分 × 43.75%
-        + 估值得分   × 18.75%
+        + 估值得分   × 23.75%
         + 流动性分   × 18.75%
-        + 风险控制分 × 18.75%
+        + 风险控制分 × 13.75%
 ```
 
 其中：
@@ -143,10 +145,9 @@ output/weekly_report_YYYYMMDD.xlsx
 
 估值得分：
 
-- 当前使用 `PE_TTM`。
-- 在全样本候选池内计算 PE_TTM 反向分位：PE 越低，估值得分越高。
-- 不再按行业分组；当前数据源的行业字段不稳定。
-- PE 缺失、非正或异常时给低分/容错分，不让程序失败。
+- 当前使用 Tushare `daily_basic.pe_ttm`。
+- 优先按行业 PE 基准做相对评分；行业无法映射时，才回退为候选池内 PE_TTM 反向分位。
+- PE 缺失给容错低分，PE<=0 视为亏损/不可按便宜处理。
 - PEG 当前禁用，不参与核心评分。
 
 ### 5.3 实际可获取的数据标注
@@ -154,7 +155,7 @@ output/weekly_report_YYYYMMDD.xlsx
 当前稳定可获取并实际参与的字段：
 
 - 股票代码、名称。
-- 最新价。
+- 最新价（Tushare 盘后日线收盘价，不取盘中实时价）。
 - 历史 K 线收盘价、最高价、最低价、成交额。
 - 20/60/120 日均线。
 - 近 20/60/120 日涨跌幅。
@@ -167,10 +168,10 @@ output/weekly_report_YYYYMMDD.xlsx
 
 可获取但不完全稳定、因此采用容错处理的字段：
 
-- 流通市值 / 总市值：数据源缺字段时跳过硬过滤。
-- PE_TTM：可参与估值得分，但缺失时按低分处理。
+- 流通市值 / 总市值：来自 Tushare，用于市值排名和展示。
+- PE_TTM：来自 Tushare `daily_basic.pe_ttm`，参与估值得分。
+- 行业：来自 Tushare `stock_basic.industry`，用于行业 PE 基准映射；映射失败时估值分回退到全样本 PE_TTM 反向分位。
 - **ROE、经营现金流/净利润、扣非净利润同比：当前无法稳定获取，已不参与评分；若偶尔获取到，仅作为排雷参考。**
-- **行业：当前数据源不稳定，已不参与估值得分。**
 
 当前禁用或不作为核心条件的字段：
 
