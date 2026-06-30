@@ -792,10 +792,80 @@ def download_stock_spot_eastmoney() -> pd.DataFrame:
     raise RuntimeError("东方财富快照接口失败")
 
 
+def download_stock_spot_akshare_fallback() -> pd.DataFrame:
+    """Fetch live A-share prices from AkShare and enrich with last report fundamentals.
+
+    AkShare's non-Eastmoney realtime source has fresh prices/amounts, but not PE-TTM,
+    industry, listing date, or market-cap rank. To preserve the user's universe rule
+    as much as possible when Eastmoney push2 disconnects, reuse the latest generated
+    report's static columns and overwrite only live market fields from AkShare.
+    """
+    live = call_with_retry(ak.stock_zh_a_spot, retries=1).copy()
+    if live.empty:
+        raise RuntimeError("AkShare实时行情返回为空")
+    live["代码"] = live["代码"].map(normalize_code)
+    live["名称"] = live["名称"].map(clean_name)
+    live = live[live["代码"].str.startswith(STOCK_PREFIXES)].copy()
+    for col in ["最新价", "成交额", "成交量"]:
+        live[col] = pd.to_numeric(live.get(col), errors="coerce")
+
+    report_files = sorted(OUTPUT_DIR.glob("weekly_report_*.xlsx"), key=lambda path: path.stat().st_mtime, reverse=True)
+    last_scores = None
+    for report in report_files:
+        try:
+            df = pd.read_excel(report, sheet_name="全部评分")
+            if "代码" in df.columns and not df.empty:
+                last_scores = df.copy()
+                break
+        except Exception:
+            continue
+    if last_scores is None:
+        raise RuntimeError("AkShare备用源缺少总市值/PE_TTM字段，且未找到可复用的上一期全部评分")
+
+    last_scores["代码"] = last_scores["代码"].map(normalize_code)
+    last_scores["名称"] = last_scores["名称"].map(clean_name)
+    keep = ["代码", "名称", "流通市值", "行业", "PE_TTM", "股票池初筛排名"]
+    for col in keep:
+        if col not in last_scores.columns:
+            last_scores[col] = np.nan
+    base = last_scores[keep].drop_duplicates(subset=["代码"], keep="first").copy()
+    base = base.rename(columns={"股票池初筛排名": "市值排名"})
+    base["总市值"] = base["流通市值"]
+    base["上市日期"] = np.nan
+    base["PEG"] = np.nan
+
+    merged = base.merge(live[["代码", "名称", "最新价", "成交额", "成交量"]], on="代码", how="left", suffixes=("", "_live"))
+    merged["名称"] = merged["名称_live"].fillna(merged["名称"])
+    merged = merged.drop(columns=["名称_live"])
+    if merged["最新价"].isna().all():
+        raise RuntimeError("AkShare备用源未能匹配到上一期股票池的实时价格")
+
+    # Add all other live rows with a far-out rank so holding checks can still use
+    # current prices, while candidate selection remains limited to the static
+    # ranked universe recovered from the previous report.
+    extra = live[~live["代码"].isin(set(merged["代码"]))].copy()
+    if not extra.empty:
+        extra["总市值"] = np.nan
+        extra["流通市值"] = np.nan
+        extra["上市日期"] = np.nan
+        extra["行业"] = "未知"
+        extra["PE_TTM"] = np.nan
+        extra["PEG"] = np.nan
+        extra["市值排名"] = 999999
+        extra = extra[["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG", "市值排名"]]
+        merged = pd.concat([merged, extra], ignore_index=True, sort=False)
+    print("东方财富快照失败，已改用 AkShare 实时行情 + 上一期股票池静态字段；实时价格来自 AkShare。")
+    return normalize_spot_frame(merged, "STOCK")
+
+
 def download_stock_spot() -> pd.DataFrame:
     # For trading-day reports, prefer fast live Eastmoney push2 data.
-    # Do not fall back to slow AkShare pagination here: it can hang for minutes and hide freshness failures.
-    return download_stock_spot_eastmoney()
+    # If Eastmoney is disconnected, use AkShare live prices but keep fail-closed freshness checks.
+    try:
+        return download_stock_spot_eastmoney()
+    except Exception as exc:
+        print(f"东方财富股票快照失败，尝试 AkShare 备用源：{exc}")
+        return download_stock_spot_akshare_fallback()
 
 
 def download_stock_code_list() -> pd.DataFrame:
@@ -1210,6 +1280,17 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
     target_size = int(universe_cfg.get("target_universe_size", 80))
     extra_rank_start = int(universe_cfg.get("extra_rank_start", 200))
     extra_rank_end = int(universe_cfg.get("extra_rank_end", 220))
+    extra_rank_ranges = universe_cfg.get("extra_rank_ranges") or [[extra_rank_start, extra_rank_end]]
+    normalized_extra_ranges = []
+    for item in extra_rank_ranges:
+        try:
+            start, end = int(item[0]), int(item[1])
+        except Exception:
+            continue
+        if start > 0 and end >= start:
+            normalized_extra_ranges.append((start, end))
+    if not normalized_extra_ranges:
+        normalized_extra_ranges = [(extra_rank_start, extra_rank_end)]
     min_listing_days = int(universe_cfg.get("min_listing_days", 180))
 
     merged["名称"] = merged["名称"].map(clean_name)
@@ -1223,10 +1304,10 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
         merged["市值排名"] = np.arange(1, len(merged) + 1)
     merged["上市天数"] = listing_days_from_series(merged["上市日期"])
 
-    # Strict user rule: initial universe is total market-cap rank 1-80 plus rank 200-220.
+    # Strict user rule: initial universe is total market-cap rank 1-target_size plus configured mid/small-cap rank ranges.
     top_pool = merged[(merged["市值排名"] >= 1) & (merged["市值排名"] <= target_size)].copy()
-    extra_pool = merged[(merged["市值排名"] >= extra_rank_start) & (merged["市值排名"] <= extra_rank_end)].copy()
-    merged = pd.concat([top_pool, extra_pool], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")
+    extra_pools = [merged[(merged["市值排名"] >= start) & (merged["市值排名"] <= end)].copy() for start, end in normalized_extra_ranges]
+    merged = pd.concat([top_pool, *extra_pools], ignore_index=True).drop_duplicates(subset=["代码"], keep="first")
     merged = merged[merged["上市天数"].isna() | (merged["上市天数"] >= min_listing_days)].copy()
 
     if merged.empty:
@@ -1243,7 +1324,8 @@ def build_stock_candidates(cfg: Dict[str, Any]) -> pd.DataFrame:
     # 只对最终股票池补缺失 PE/市值，PEG 按新策略禁用，不参与选股。
     merged = populate_stock_fundamental_metrics(merged, cfg).reset_index(drop=True)
     snapshot_count = len(merged)
-    print(f"股票池初筛：{raw_count} -> {snapshot_count}；按总市值排名保留1-{target_size}名 + 第{extra_rank_start}-{extra_rank_end}名，再进入筛选和打分。")
+    range_text = " + ".join([f"第{start}-{end}名" for start, end in normalized_extra_ranges])
+    print(f"股票池初筛：{raw_count} -> {snapshot_count}；按总市值排名保留1-{target_size}名 + {range_text}，再进入筛选和打分。")
     return merged[[
         "代码", "名称", "asset_type", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "上市天数", "行业",
         "股票池排名分", "股票池初筛排名", "市值排名", "流通市值排名分", "成交额排名分", "PE_TTM", "PEG",

@@ -28,3 +28,6 @@ trades.csv
 .DS_Store
 .idea/
 .vscode/
+
+# Secrets
+.tushare_token
