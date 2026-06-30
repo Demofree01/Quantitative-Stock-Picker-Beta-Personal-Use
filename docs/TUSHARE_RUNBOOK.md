@@ -50,3 +50,17 @@ python scripts/verify_latest_report.py
 - 最终全部评分：50 行，PE_TTM 全有效
 - 排名段命中：1-80 段 34 只、200-220 段 8 只、500-520 段 8 只
 - ETF 错误卖出/减仓建议数：0
+
+## 运行效率与缓存
+
+2026-06-30 进一步整理：
+
+- Tushare 快照缓存：`cache/tushare/stock_spot_<trade_date>.csv`。
+- Tushare 历史K线缓存：`cache/tushare/history/<trade_date>/stock_<code>_<adjust>.csv`。
+- 缓存按交易日隔离：只有缓存最后日期等于当前 Tushare 最新交易日才会命中，不会跨交易日复用旧数据。
+- 每次运行会写元数据：`output/logs/latest_tushare_metadata.json`，包括交易日、快照是否命中缓存、历史缓存命中数、API 拉取数。
+
+最近验证：
+
+- 第一遍：快照缓存命中，历史 API 拉取 118 只。
+- 第二遍：快照缓存命中，历史缓存命中 118 只，历史 API 拉取 0 只；报告验收结果一致。

@@ -9,6 +9,7 @@ Data policy:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -37,6 +38,26 @@ CACHE_DIR = PROJECT_DIR / "cache" / "tushare"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def read_csv_if_valid(path: Path, required_cols: list[str]) -> Optional[pd.DataFrame]:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, dtype={"代码": str})
+    except Exception:
+        return None
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing or df.empty:
+        return None
+    return df
+
+
+def atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp, index=False, encoding="utf-8-sig")
+    tmp.replace(path)
+
+
 def load_token() -> str:
     token = os.environ.get("TUSHARE_TOKEN") or os.environ.get("TS_TOKEN")
     if not token and TOKEN_FILE.exists():
@@ -58,6 +79,9 @@ class TushareProvider:
         self.pro = ts.pro_api(token)
         self.trade_date: Optional[str] = None
         self.stock_spot_cache: Optional[pd.DataFrame] = None
+        self.history_cache_hits = 0
+        self.history_api_fetches = 0
+        self.spot_cache_hit = False
 
     def call(self, name: str, **kwargs) -> pd.DataFrame:
         last_exc = None
@@ -91,6 +115,13 @@ class TushareProvider:
         if self.stock_spot_cache is not None:
             return self.stock_spot_cache.copy()
         trade_date = self.latest_trade_date()
+        cache_path = CACHE_DIR / f"stock_spot_{trade_date}.csv"
+        cached = read_csv_if_valid(cache_path, ["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "行业", "PE_TTM", "市值排名"])
+        if cached is not None and cached["PE_TTM"].notna().sum() > 0:
+            self.spot_cache_hit = True
+            print(f"Tushare股票快照缓存命中：{trade_date}，{len(cached)}只，PE_TTM有效{cached['PE_TTM'].notna().sum()}只；缓存 {cache_path}")
+            self.stock_spot_cache = w.normalize_spot_frame(cached, "STOCK")
+            return self.stock_spot_cache.copy()
         daily = self.call(
             "daily",
             trade_date=trade_date,
@@ -131,8 +162,7 @@ class TushareProvider:
         out = df[["代码", "名称", "最新价", "成交额", "成交量", "总市值", "流通市值", "上市日期", "行业", "PE_TTM", "PEG", "市值排名"]].copy()
         if out["PE_TTM"].notna().sum() == 0:
             raise RuntimeError("Tushare daily_basic 未返回有效 PE_TTM")
-        cache_path = CACHE_DIR / f"stock_spot_{trade_date}.csv"
-        out.to_csv(cache_path, index=False, encoding="utf-8-sig")
+        atomic_write_csv(out, cache_path)
         print(f"Tushare股票快照：{trade_date}，{len(out)}只，PE_TTM有效{out['PE_TTM'].notna().sum()}只；缓存 {cache_path}")
         self.stock_spot_cache = w.normalize_spot_frame(out, "STOCK")
         return self.stock_spot_cache.copy()
@@ -143,9 +173,17 @@ class TushareProvider:
         today = datetime.now()
         start = (today - timedelta(days=int(cfg["data"].get("history_days", 300)) + 30)).strftime("%Y%m%d")
         end = self.latest_trade_date()
+        adjust = str(cfg["data"].get("adjust", "qfq"))
+        cache_path = CACHE_DIR / "history" / end / f"stock_{code}_{adjust}.csv"
+        cached = read_csv_if_valid(cache_path, ["date", "open", "close", "high", "low", "amount", "turnover_amount"])
+        if cached is not None:
+            cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+            if cached["date"].notna().any() and cached["date"].max().strftime("%Y%m%d") == end:
+                self.history_cache_hits += 1
+                return cached
         ts_code = f"{code}.SH" if str(code).startswith("6") else f"{code}.SZ"
         try:
-            df = ts.pro_bar(ts_code=ts_code, adj=str(cfg["data"].get("adjust", "qfq")), start_date=start, end_date=end)
+            df = ts.pro_bar(ts_code=ts_code, adj=adjust, start_date=start, end_date=end)
         except Exception:
             df = None
         if df is None or df.empty:
@@ -177,6 +215,8 @@ class TushareProvider:
         }).dropna(subset=["date", "close", "turnover_amount"])
         if len(out) < int(cfg.get("filter", {}).get("min_history_bars", 120)):
             raise RuntimeError(f"Tushare历史行情不足：{code}，仅{len(out)}条")
+        self.history_api_fetches += 1
+        atomic_write_csv(out, cache_path)
         return out
 
 
@@ -231,6 +271,19 @@ def main() -> None:
 
     w.load_config = read_config_tushare
     w.main()
+
+    metadata = {
+        "run_finished_at": datetime.now().isoformat(timespec="seconds"),
+        "trade_date": provider.trade_date,
+        "spot_cache_hit": provider.spot_cache_hit,
+        "history_cache_hits": provider.history_cache_hits,
+        "history_api_fetches": provider.history_api_fetches,
+        "data_policy": "Tushare daily + daily_basic; A-share only; no intraday; no ETF quotes",
+    }
+    meta_path = PROJECT_DIR / "output" / "logs" / "latest_tushare_metadata.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Tushare运行元数据：{metadata}")
 
 
 if __name__ == "__main__":
